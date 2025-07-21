@@ -59,31 +59,36 @@ export class AudioUtils {
       throw new Error('Audio context not initialized');
     }
 
-    // 添加前导静音和同步信号
-    const syncPattern = '1010'; // 4位同步信号
-    const binary = syncPattern + this.textToBinary(text);
-    const duration = binary.length * AudioUtils.BIT_DURATION + 0.5; // 额外500ms缓冲
+    // 使用更清晰的帧格式：开始标记 + 数据 + 结束标记
+    const startMarker = '1100'; // 开始标记
+    const endMarker = '0011';   // 结束标记
+    const data = this.textToBinary(text);
+    const frame = startMarker + data + endMarker;
 
-    console.log(`Sending: sync(${syncPattern}) + text("${text}") = ${binary}`);
+    console.log(`Sending frame: ${frame}`);
+    console.log(`- Start: ${startMarker}`);
+    console.log(`- Data("${text}"): ${data}`);
+    console.log(`- End: ${endMarker}`);
+
+    const duration = frame.length * AudioUtils.BIT_DURATION + 1.0; // 1秒缓冲
 
     // 创建音频buffer
     const buffer = this.audioContext.createBuffer(1, duration * AudioUtils.SAMPLE_RATE, AudioUtils.SAMPLE_RATE);
-    const data = buffer.getChannelData(0);
+    const data_buffer = buffer.getChannelData(0);
 
-    // 300ms静音开始
-    const silentSamples = 0.3 * AudioUtils.SAMPLE_RATE;
+    // 500ms前导静音
+    const silentSamples = 0.5 * AudioUtils.SAMPLE_RATE;
 
     // 生成RTZ-FSK调制信号
-    for (let i = 0; i < binary.length; i++) {
-      const bit = binary[i];
+    for (let i = 0; i < frame.length; i++) {
+      const bit = frame[i];
       const frequency = bit === '0' ? AudioUtils.FREQ_0 : AudioUtils.FREQ_1;
       const startSample = silentSamples + i * AudioUtils.BIT_DURATION * AudioUtils.SAMPLE_RATE;
       const endSample = startSample + AudioUtils.BIT_DURATION * AudioUtils.SAMPLE_RATE;
 
-      for (let sample = startSample; sample < endSample && sample < data.length; sample++) {
+      for (let sample = startSample; sample < endSample && sample < data_buffer.length; sample++) {
         const time = sample / AudioUtils.SAMPLE_RATE;
-        // 使用更稳定的信号幅度
-        data[sample] = Math.sin(2 * Math.PI * frequency * time) * 0.3;
+        data_buffer[sample] = Math.sin(2 * Math.PI * frequency * time) * 0.3;
       }
     }
 

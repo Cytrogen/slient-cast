@@ -56,7 +56,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ onMessageReceived, onStatusC
       const currentTime = Date.now();
 
       // 防止重复检测同一个bit
-      if (currentTime - lastDetectionRef.current > 120) { // 增加间隔
+      if (currentTime - lastDetectionRef.current > 180) { // 配合200ms bit持续时间
         // 直接添加到二进制缓冲区
         binaryBufferRef.current += analysis.detectedBit;
         setDetectedBits(binaryBufferRef.current);
@@ -72,27 +72,45 @@ export const Receiver: React.FC<ReceiverProps> = ({ onMessageReceived, onStatusC
         }
 
         // 如果有足够的bits（8的倍数），尝试解码
-        const byteLength = Math.floor(binaryBufferRef.current.length / 8) * 8;
-        if (byteLength >= 8 && binaryBufferRef.current.length >= 16) {
-          const bytes = binaryBufferRef.current.substring(0, byteLength);
+        if (binaryBufferRef.current.length >= 8) {
+          // 尝试不同的起始位置来找到正确的字符边界
+          let decoded = '';
+          let bestMatch = '';
+          let bestStart = 0;
 
-          try {
-            const decoded = audioUtilsRef.current!.decodeBinary(bytes);
-            // 检查是否包含可打印字符
-            if (decoded && /^[\x20-\x7E]+$/.test(decoded)) {
-              setReceivedMessage(decoded);
-              onMessageReceived?.(decoded);
-              setStatus(`Received: "${decoded}"`);
-              console.log(`Successfully decoded: "${decoded}"`);
+          for (let start = 0; start < 8 && start < binaryBufferRef.current.length; start++) {
+            const remaining = binaryBufferRef.current.substring(start);
+            const byteLength = Math.floor(remaining.length / 8) * 8;
 
-              // 清理已处理的数据
-              binaryBufferRef.current = binaryBufferRef.current.substring(byteLength);
-            } else {
-              console.log(`Decoded non-printable: ${decoded} (${decoded.charCodeAt(0)})`);
+            if (byteLength >= 8) {
+              const bytes = remaining.substring(0, byteLength);
+
+              try {
+                const testDecoded = audioUtilsRef.current!.decodeBinary(bytes);
+                console.log(`Testing offset ${start}: "${bytes}" -> "${testDecoded}" (${testDecoded.split('').map(c => c.charCodeAt(0)).join(',')})`);
+
+                // 检查是否包含可打印字符
+                if (testDecoded && /^[\x20-\x7E]+$/.test(testDecoded)) {
+                  if (testDecoded.length > bestMatch.length) {
+                    bestMatch = testDecoded;
+                    bestStart = start;
+                  }
+                }
+              } catch (error) {
+                console.log(`Testing offset ${start}: decode error`);
+              }
             }
+          }
 
-          } catch (error) {
-            console.log('Decoding error:', error);
+          if (bestMatch) {
+            setReceivedMessage(bestMatch);
+            onMessageReceived?.(bestMatch);
+            setStatus(`Received: "${bestMatch}"`);
+            console.log(`Successfully decoded: "${bestMatch}" at offset ${bestStart}`);
+
+            // 清理已处理的数据
+            const processedBits = bestStart + bestMatch.length * 8;
+            binaryBufferRef.current = binaryBufferRef.current.substring(processedBits);
           }
         }
 

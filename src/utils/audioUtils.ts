@@ -11,9 +11,9 @@ export class AudioUtils {
 
   // 信号参数配置
   private static readonly CARRIER_FREQUENCY = 18000; // 18kHz载波频率
-  private static readonly BIT_DURATION = 0.15; // 每个bit持续150ms（稍微延长）
-  private static readonly FREQ_0 = 3000; // 表示0的频率 - 临时改为3kHz测试
-  private static readonly FREQ_1 = 4000; // 表示1的频率 - 临时改为4kHz测试
+  private static readonly BIT_DURATION = 0.2; // 每个bit持续200ms（进一步延长）
+  private static readonly FREQ_0 = 2000; // 表示0的频率 - 2kHz
+  private static readonly FREQ_1 = 5000; // 表示1的频率 - 5kHz（更大差异）
   private static readonly SAMPLE_RATE = 44100;
 
   /**
@@ -59,16 +59,19 @@ export class AudioUtils {
       throw new Error('Audio context not initialized');
     }
 
-    // 临时去掉前导码，直接发送文本
-    const binary = this.textToBinary(text);
-    const duration = binary.length * AudioUtils.BIT_DURATION + 0.3; // 额外300ms缓冲
+    // 添加前导静音和同步信号
+    const syncPattern = '1010'; // 4位同步信号
+    const binary = syncPattern + this.textToBinary(text);
+    const duration = binary.length * AudioUtils.BIT_DURATION + 0.5; // 额外500ms缓冲
+
+    console.log(`Sending: sync(${syncPattern}) + text("${text}") = ${binary}`);
 
     // 创建音频buffer
     const buffer = this.audioContext.createBuffer(1, duration * AudioUtils.SAMPLE_RATE, AudioUtils.SAMPLE_RATE);
     const data = buffer.getChannelData(0);
 
-    // 200ms静音开始
-    const silentSamples = 0.2 * AudioUtils.SAMPLE_RATE;
+    // 300ms静音开始
+    const silentSamples = 0.3 * AudioUtils.SAMPLE_RATE;
 
     // 生成RTZ-FSK调制信号
     for (let i = 0; i < binary.length; i++) {
@@ -211,12 +214,16 @@ export class AudioUtils {
     let detectedBit: '0' | '1' | undefined;
     if (detected) {
       const energyDiff = Math.abs(energy0 - energy1);
-      const minEnergyForBit = Math.max(energy0, energy1) * 0.2; // 降低要求
+      const totalEnergy = energy0 + energy1;
+      const minEnergyForBit = totalEnergy * 0.3; // 需要至少30%的能量差异
 
-      // 只有当两个频率的能量差异足够大时才确定bit
-      if (energyDiff > minEnergyForBit) {
+      // 只有当两个频率的能量差异足够大，且其中一个明显更强时才确定bit
+      if (energyDiff > minEnergyForBit && energyDiff > 40) { // 绝对差异至少40
         detectedBit = energy1 > energy0 ? '1' : '0';
-        console.log(`Strong signal detected: bit=${detectedBit}, energy0=${Math.round(energy0)}, energy1=${Math.round(energy1)}, quality=${Math.round(signalQuality)}`);
+        console.log(`Strong signal detected: bit=${detectedBit}, energy0=${Math.round(energy0)}, energy1=${Math.round(energy1)}, diff=${Math.round(energyDiff)}, quality=${Math.round(signalQuality)}`);
+      } else {
+        // 信号不够清晰，不确定bit值
+        console.log(`Weak signal: energy0=${Math.round(energy0)}, energy1=${Math.round(energy1)}, diff=${Math.round(energyDiff)} (need >${Math.round(minEnergyForBit)})`);
       }
     }
 

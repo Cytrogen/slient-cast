@@ -44,8 +44,10 @@ export const Transmitter: React.FC<TransmitterProps> = ({ onStatusChange }) => {
       await audioUtilsRef.current.initAudioContext();
       setStatus('Transmitting signal...');
 
+      const binary = audioUtilsRef.current.textToBinary(message);
       console.log(`Transmitting message: "${message}"`);
-      console.log(`Binary (with preamble): 10101010${audioUtilsRef.current.textToBinary(message)}`);
+      console.log(`Message binary: ${binary}`);
+      console.log(`Full sequence: 1010${binary}`);
 
       // 等待传输完成
       await audioUtilsRef.current.transmitText(message);
@@ -125,9 +127,13 @@ export const Transmitter: React.FC<TransmitterProps> = ({ onStatusChange }) => {
 
         {message && (
           <div className="bg-gray-50 p-3 rounded-md">
-            <div className="text-xs text-gray-600 mb-1">Binary representation (no preamble for now):</div>
+            <div className="text-xs text-gray-600 mb-1">Binary with sync pattern:</div>
             <div className="text-xs font-mono text-gray-800 break-all">
+              <span className="text-red-600">1010</span>
               {audioUtilsRef.current?.textToBinary(message) || ''}
+            </div>
+            <div className="text-xs text-gray-500 mt-1">
+              Red: sync pattern, Black: message data
             </div>
           </div>
         )}

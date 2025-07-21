@@ -16,11 +16,13 @@ export const Receiver: React.FC<ReceiverProps> = ({ onMessageReceived, onStatusC
   const [receivedMessage, setReceivedMessage] = useState('');
   const [signalStrength, setSignalStrength] = useState({ freq0: 0, freq1: 0 });
   const [detectedBits, setDetectedBits] = useState('');
+  const [signalQuality, setSignalQuality] = useState(0);
 
   const audioUtilsRef = useRef<AudioUtils | null>(null);
   const animationFrameRef = useRef<number | null>(null);
   const binaryBufferRef = useRef<string>('');
   const lastDetectionRef = useRef<number>(0);
+  const bitBufferRef = useRef<Array<{ bit: string; timestamp: number; quality: number }>>([]);
 
   useEffect(() => {
     audioUtilsRef.current = new AudioUtils();
@@ -49,28 +51,82 @@ export const Receiver: React.FC<ReceiverProps> = ({ onMessageReceived, onStatusC
 
     const analysis = audioUtilsRef.current.analyzeSpectrum();
     setSignalStrength({ freq0: analysis.freq0, freq1: analysis.freq1 });
+    setSignalQuality(analysis.signalQuality);
 
-    if (analysis.detected) {
+    if (analysis.detected && analysis.detectedBit && analysis.signalQuality > 20) {
       const currentTime = Date.now();
 
-      // 防止重复检测同一个bit
-      if (currentTime - lastDetectionRef.current > 50) {
-        const detectedBit = analysis.freq1 > analysis.freq0 ? '1' : '0';
-        binaryBufferRef.current += detectedBit;
-        setDetectedBits(binaryBufferRef.current);
-        lastDetectionRef.current = currentTime;
+      // 防止重复检测同一个bit - 增加时间间隔
+      if (currentTime - lastDetectionRef.current > 80) { // 增加到80ms
+        // 将检测到的bit加入缓冲区
+        bitBufferRef.current.push({
+          bit: analysis.detectedBit,
+          timestamp: currentTime,
+          quality: analysis.signalQuality
+        });
 
-        // 尝试解码完整的8位字符
-        if (binaryBufferRef.current.length >= 8 && binaryBufferRef.current.length % 8 === 0) {
-          try {
-            const decoded = audioUtilsRef.current.decodeBinary(binaryBufferRef.current);
-            setReceivedMessage(decoded);
-            onMessageReceived?.(decoded);
-            setStatus(`Received: "${decoded}"`);
-          } catch (error) {
-            // 继续监听，可能需要更多数据
+        // 清理超过500ms的旧数据
+        bitBufferRef.current = bitBufferRef.current.filter(
+          item => currentTime - item.timestamp < 500
+        );
+
+        // 如果缓冲区中有足够的数据，尝试解码
+        if (bitBufferRef.current.length >= 8) {
+          const recentBits = bitBufferRef.current
+            .sort((a, b) => a.timestamp - b.timestamp)
+            .slice(-16); // 取最近的16个bit
+
+          // 按时间分组，每100ms一组
+          const bitGroups: string[] = [];
+          let currentGroup = '';
+          let lastTimestamp = 0;
+
+          for (const bitData of recentBits) {
+            if (bitData.timestamp - lastTimestamp > 100 || currentGroup.length >= 1) {
+              if (currentGroup) {
+                bitGroups.push(currentGroup);
+              }
+              currentGroup = bitData.bit;
+            } else {
+              // 同一时间窗口内，选择质量更高的bit
+              if (bitData.quality > 30) {
+                currentGroup = bitData.bit;
+              }
+            }
+            lastTimestamp = bitData.timestamp;
+          }
+
+          if (currentGroup) {
+            bitGroups.push(currentGroup);
+          }
+
+          // 构建二进制字符串
+          const binaryStr = bitGroups.join('');
+          setDetectedBits(binaryStr);
+
+          // 尝试解码完整的字符
+          if (binaryStr.length >= 8) {
+            const completeBytes = Math.floor(binaryStr.length / 8) * 8;
+            const completeBinary = binaryStr.substring(0, completeBytes);
+
+            try {
+              const decoded = audioUtilsRef.current.decodeBinary(completeBinary);
+              if (decoded && decoded.trim()) {
+                setReceivedMessage(decoded);
+                onMessageReceived?.(decoded);
+                setStatus(`Received: "${decoded}"`);
+
+                // 清理缓冲区
+                bitBufferRef.current = [];
+                binaryBufferRef.current = '';
+              }
+            } catch (error) {
+              // 继续监听，可能需要更多数据
+            }
           }
         }
+
+        lastDetectionRef.current = currentTime;
       }
     }
 
@@ -92,6 +148,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ onMessageReceived, onStatusC
       setReceivedMessage('');
       setDetectedBits('');
       binaryBufferRef.current = '';
+      bitBufferRef.current = [];
 
       listenLoop();
     } catch (error) {
@@ -125,6 +182,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ onMessageReceived, onStatusC
     setReceivedMessage('');
     setDetectedBits('');
     binaryBufferRef.current = '';
+    bitBufferRef.current = [];
     if (isListening) {
       setStatus('Listening for signals...');
     }
@@ -186,8 +244,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ onMessageReceived, onStatusC
 
         {isListening && (
           <div className="bg-gray-50 p-3 rounded-md">
-            <div className="text-xs text-gray-600 mb-2">Signal Strength:</div>
-            <div className="grid grid-cols-2 gap-2 text-xs">
+            <div className="text-xs text-gray-600 mb-2">Signal Analysis:</div>
+            <div className="grid grid-cols-3 gap-2 text-xs">
               <div className="bg-blue-100 p-2 rounded">
                 <div>Freq 0 (17.5kHz)</div>
                 <div className="font-mono">{signalStrength.freq0}</div>
@@ -195,6 +253,10 @@ export const Receiver: React.FC<ReceiverProps> = ({ onMessageReceived, onStatusC
               <div className="bg-green-100 p-2 rounded">
                 <div>Freq 1 (18.5kHz)</div>
                 <div className="font-mono">{signalStrength.freq1}</div>
+              </div>
+              <div className="bg-purple-100 p-2 rounded">
+                <div>Signal Quality</div>
+                <div className="font-mono">{signalQuality}%</div>
               </div>
             </div>
           </div>

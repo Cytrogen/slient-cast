@@ -59,23 +59,29 @@ export class AudioUtils {
       throw new Error('Audio context not initialized');
     }
 
-    const binary = this.textToBinary(text);
-    const duration = binary.length * AudioUtils.BIT_DURATION;
+    // 添加前导码：10101010（帮助接收端同步）
+    const preamble = '10101010';
+    const binary = preamble + this.textToBinary(text);
+    const duration = binary.length * AudioUtils.BIT_DURATION + 0.2; // 额外200ms缓冲
 
     // 创建音频buffer
     const buffer = this.audioContext.createBuffer(1, duration * AudioUtils.SAMPLE_RATE, AudioUtils.SAMPLE_RATE);
     const data = buffer.getChannelData(0);
 
+    // 100ms静音开始
+    const silentSamples = 0.1 * AudioUtils.SAMPLE_RATE;
+
     // 生成RTZ-FSK调制信号
     for (let i = 0; i < binary.length; i++) {
       const bit = binary[i];
       const frequency = bit === '0' ? AudioUtils.FREQ_0 : AudioUtils.FREQ_1;
-      const startSample = i * AudioUtils.BIT_DURATION * AudioUtils.SAMPLE_RATE;
+      const startSample = silentSamples + i * AudioUtils.BIT_DURATION * AudioUtils.SAMPLE_RATE;
       const endSample = startSample + AudioUtils.BIT_DURATION * AudioUtils.SAMPLE_RATE;
 
-      for (let sample = startSample; sample < endSample; sample++) {
+      for (let sample = startSample; sample < endSample && sample < data.length; sample++) {
         const time = sample / AudioUtils.SAMPLE_RATE;
-        data[sample] = Math.sin(2 * Math.PI * frequency * time) * 0.1; // 低音量避免干扰
+        // 使用更稳定的信号幅度
+        data[sample] = Math.sin(2 * Math.PI * frequency * time) * 0.2;
       }
     }
 
@@ -84,6 +90,11 @@ export class AudioUtils {
     source.buffer = buffer;
     source.connect(this.audioContext.destination);
     source.start();
+
+    // 等待播放完成
+    return new Promise(resolve => {
+      setTimeout(resolve, duration * 1000);
+    });
   }
 
   /**
@@ -127,9 +138,15 @@ export class AudioUtils {
   /**
    * 分析频谱并检测信号
    */
-  analyzeSpectrum(): { freq0: number; freq1: number; detected: boolean } {
+  analyzeSpectrum(): {
+    freq0: number;
+    freq1: number;
+    detected: boolean;
+    detectedBit?: '0' | '1';
+    signalQuality: number;
+  } {
     if (!this.analyser) {
-      return { freq0: 0, freq1: 0, detected: false };
+      return { freq0: 0, freq1: 0, detected: false, signalQuality: 0 };
     }
 
     const bufferLength = this.analyser.frequencyBinCount;
@@ -139,22 +156,71 @@ export class AudioUtils {
     const nyquist = AudioUtils.SAMPLE_RATE / 2;
     const binSize = nyquist / bufferLength;
 
-    // 计算目标频率对应的bin索引
+    // 计算目标频率对应的bin索引，使用更宽的频率窗口
     const bin0 = Math.round(AudioUtils.FREQ_0 / binSize);
     const bin1 = Math.round(AudioUtils.FREQ_1 / binSize);
+    const windowSize = 3; // 使用±3个bin的窗口
 
-    // 获取目标频率的能量
-    const energy0 = dataArray[bin0] || 0;
-    const energy1 = dataArray[bin1] || 0;
+    // 计算每个频率的平均能量
+    let energy0 = 0;
+    let energy1 = 0;
 
-    // 检测阈值
-    const threshold = 100;
-    const detected = energy0 > threshold || energy1 > threshold;
+    for (let i = -windowSize; i <= windowSize; i++) {
+      const idx0 = bin0 + i;
+      const idx1 = bin1 + i;
+
+      if (idx0 >= 0 && idx0 < bufferLength) {
+        energy0 += dataArray[idx0];
+      }
+      if (idx1 >= 0 && idx1 < bufferLength) {
+        energy1 += dataArray[idx1];
+      }
+    }
+
+    energy0 /= (windowSize * 2 + 1);
+    energy1 /= (windowSize * 2 + 1);
+
+    // 计算背景噪声水平
+    let noiseLevel = 0;
+    let noiseCount = 0;
+    for (let i = 0; i < bufferLength; i++) {
+      // 排除目标频率附近的bin
+      if (Math.abs(i - bin0) > windowSize * 2 && Math.abs(i - bin1) > windowSize * 2) {
+        noiseLevel += dataArray[i];
+        noiseCount++;
+      }
+    }
+    noiseLevel = noiseCount > 0 ? noiseLevel / noiseCount : 50;
+
+    // 动态阈值：基于噪声水平
+    const dynamicThreshold = Math.max(noiseLevel + 30, 80);
+
+    // 检测信号
+    const maxEnergy = Math.max(energy0, energy1);
+    const detected = maxEnergy > dynamicThreshold;
+
+    // 计算信号质量
+    const signalToNoise = maxEnergy / (noiseLevel + 1);
+    const signalQuality = Math.min(100, Math.max(0, (signalToNoise - 1) * 20));
+
+    // 确定检测到的bit
+    let detectedBit: '0' | '1' | undefined;
+    if (detected) {
+      const energyDiff = Math.abs(energy0 - energy1);
+      const minEnergyForBit = Math.max(energy0, energy1) * 0.3;
+
+      // 只有当两个频率的能量差异足够大时才确定bit
+      if (energyDiff > minEnergyForBit) {
+        detectedBit = energy1 > energy0 ? '1' : '0';
+      }
+    }
 
     return {
-      freq0: energy0,
-      freq1: energy1,
-      detected
+      freq0: Math.round(energy0),
+      freq1: Math.round(energy1),
+      detected,
+      detectedBit,
+      signalQuality: Math.round(signalQuality)
     };
   }
 

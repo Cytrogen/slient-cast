@@ -44,6 +44,7 @@ export const Transmitter: React.FC<TransmitterProps> = ({ onStatusChange }) => {
       await audioUtilsRef.current.initAudioContext();
       setStatus('Transmitting signal...');
 
+      // 等待传输完成
       await audioUtilsRef.current.transmitText(message);
 
       setStatus('Transmission complete');
@@ -119,8 +120,9 @@ export const Transmitter: React.FC<TransmitterProps> = ({ onStatusChange }) => {
 
         {message && (
           <div className="bg-gray-50 p-3 rounded-md">
-            <div className="text-xs text-gray-600 mb-1">Binary representation:</div>
+            <div className="text-xs text-gray-600 mb-1">Binary representation (with preamble):</div>
             <div className="text-xs font-mono text-gray-800 break-all">
+              <span className="text-blue-600">10101010</span>
               {audioUtilsRef.current?.textToBinary(message) || ''}
             </div>
           </div>

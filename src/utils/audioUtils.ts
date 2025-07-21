@@ -11,10 +11,13 @@ export class AudioUtils {
 
   // 信号参数配置
   private static readonly CARRIER_FREQUENCY = 18000; // 18kHz载波频率
-  private static readonly BIT_DURATION = 0.2; // 每个bit持续200ms（进一步延长）
-  private static readonly FREQ_0 = 2000; // 表示0的频率 - 2kHz
-  private static readonly FREQ_1 = 5000; // 表示1的频率 - 5kHz（更大差异）
+  private static readonly BIT_DURATION = 0.1; // 每个bit持续100ms
+  private static readonly FREQ_0 = 17500; // 表示0的频率
+  private static readonly FREQ_1 = 18500; // 表示1的频率
   private static readonly SAMPLE_RATE = 44100;
+  private static readonly PREAMBLE = '10101010'; // 前导码：交替的0和1用于同步
+  private static readonly MIN_SNR = 3.0; // 最小信噪比
+  private static readonly MIN_SIGNAL_STRENGTH = 80; // 最小信号强度
 
   /**
    * 初始化音频上下文
@@ -59,36 +62,27 @@ export class AudioUtils {
       throw new Error('Audio context not initialized');
     }
 
-    // 使用更清晰的帧格式：开始标记 + 数据 + 结束标记
-    const startMarker = '1100'; // 开始标记
-    const endMarker = '0011';   // 结束标记
-    const data = this.textToBinary(text);
-    const frame = startMarker + data + endMarker;
+    const dataBinary = this.textToBinary(text);
+    // 添加前导码和结束码
+    const fullBinary = AudioUtils.PREAMBLE + dataBinary + '11111111'; // 结束标记
+    const duration = fullBinary.length * AudioUtils.BIT_DURATION;
 
-    console.log(`Sending frame: ${frame}`);
-    console.log(`- Start: ${startMarker}`);
-    console.log(`- Data("${text}"): ${data}`);
-    console.log(`- End: ${endMarker}`);
-
-    const duration = frame.length * AudioUtils.BIT_DURATION + 1.0; // 1秒缓冲
+    console.log(`Transmitting: "${text}" -> ${dataBinary} (with preamble: ${fullBinary})`);
 
     // 创建音频buffer
     const buffer = this.audioContext.createBuffer(1, duration * AudioUtils.SAMPLE_RATE, AudioUtils.SAMPLE_RATE);
-    const data_buffer = buffer.getChannelData(0);
-
-    // 500ms前导静音
-    const silentSamples = 0.5 * AudioUtils.SAMPLE_RATE;
+    const data = buffer.getChannelData(0);
 
     // 生成RTZ-FSK调制信号
-    for (let i = 0; i < frame.length; i++) {
-      const bit = frame[i];
+    for (let i = 0; i < fullBinary.length; i++) {
+      const bit = fullBinary[i];
       const frequency = bit === '0' ? AudioUtils.FREQ_0 : AudioUtils.FREQ_1;
-      const startSample = silentSamples + i * AudioUtils.BIT_DURATION * AudioUtils.SAMPLE_RATE;
+      const startSample = i * AudioUtils.BIT_DURATION * AudioUtils.SAMPLE_RATE;
       const endSample = startSample + AudioUtils.BIT_DURATION * AudioUtils.SAMPLE_RATE;
 
-      for (let sample = startSample; sample < endSample && sample < data_buffer.length; sample++) {
+      for (let sample = startSample; sample < endSample; sample++) {
         const time = sample / AudioUtils.SAMPLE_RATE;
-        data_buffer[sample] = Math.sin(2 * Math.PI * frequency * time) * 0.3;
+        data[sample] = Math.sin(2 * Math.PI * frequency * time) * 0.2; // 增加音量
       }
     }
 
@@ -97,11 +91,6 @@ export class AudioUtils {
     source.buffer = buffer;
     source.connect(this.audioContext.destination);
     source.start();
-
-    // 等待播放完成
-    return new Promise(resolve => {
-      setTimeout(resolve, duration * 1000);
-    });
   }
 
   /**
@@ -149,11 +138,12 @@ export class AudioUtils {
     freq0: number;
     freq1: number;
     detected: boolean;
-    detectedBit?: '0' | '1';
-    signalQuality: number;
+    bit?: string;
+    quality: number;
+    snr: number;
   } {
     if (!this.analyser) {
-      return { freq0: 0, freq1: 0, detected: false, signalQuality: 0 };
+      return { freq0: 0, freq1: 0, detected: false, quality: 0, snr: 0 };
     }
 
     const bufferLength = this.analyser.frequencyBinCount;
@@ -163,93 +153,144 @@ export class AudioUtils {
     const nyquist = AudioUtils.SAMPLE_RATE / 2;
     const binSize = nyquist / bufferLength;
 
-    // 计算目标频率对应的bin索引，使用更宽的频率窗口
+    // 计算目标频率对应的bin索引
     const bin0 = Math.round(AudioUtils.FREQ_0 / binSize);
     const bin1 = Math.round(AudioUtils.FREQ_1 / binSize);
-    const windowSize = 3; // 使用±3个bin的窗口
 
-    // 计算每个频率的平均能量
-    let energy0 = 0;
-    let energy1 = 0;
-
-    for (let i = -windowSize; i <= windowSize; i++) {
-      const idx0 = bin0 + i;
-      const idx1 = bin1 + i;
-
-      if (idx0 >= 0 && idx0 < bufferLength) {
-        energy0 += dataArray[idx0];
-      }
-      if (idx1 >= 0 && idx1 < bufferLength) {
-        energy1 += dataArray[idx1];
-      }
-    }
-
-    energy0 /= (windowSize * 2 + 1);
-    energy1 /= (windowSize * 2 + 1);
+    // 计算频率带宽内的平均能量（提高检测精度）
+    const bandwidth = 3; // 检查3个bin的范围
+    const energy0 = this.getAverageEnergy(dataArray, bin0, bandwidth);
+    const energy1 = this.getAverageEnergy(dataArray, bin1, bandwidth);
 
     // 计算背景噪声水平
-    let noiseLevel = 0;
-    let noiseCount = 0;
-    for (let i = 0; i < bufferLength; i++) {
-      // 排除目标频率附近的bin
-      if (Math.abs(i - bin0) > windowSize * 2 && Math.abs(i - bin1) > windowSize * 2) {
-        noiseLevel += dataArray[i];
-        noiseCount++;
-      }
-    }
-    noiseLevel = noiseCount > 0 ? noiseLevel / noiseCount : 50;
+    const noiseLevel = this.calculateNoiseLevel(dataArray, bin0, bin1);
 
-    // 动态阈值：基于噪声水平
-    const dynamicThreshold = Math.max(noiseLevel + 15, 30); // 大幅降低阈值
-
-    // 检测信号
+    // 计算信噪比
     const maxEnergy = Math.max(energy0, energy1);
-    const detected = maxEnergy > dynamicThreshold;
+    const snr = noiseLevel > 0 ? maxEnergy / noiseLevel : 0;
 
-    // 每100次循环输出一次调试信息（避免日志过多）
-    if (Math.random() < 0.01) {
-      console.log(`Spectrum: freq0=${Math.round(energy0)}, freq1=${Math.round(energy1)}, noise=${Math.round(noiseLevel)}, threshold=${Math.round(dynamicThreshold)}, detected=${detected}`);
-    }
+    // 改进的信号检测逻辑
+    const energyDiff = Math.abs(energy0 - energy1);
+    const minEnergyThreshold = AudioUtils.MIN_SIGNAL_STRENGTH;
+    const minSNR = AudioUtils.MIN_SNR;
 
-    // 计算信号质量
-    const signalToNoise = maxEnergy / (noiseLevel + 1);
-    const signalQuality = Math.min(100, Math.max(0, (signalToNoise - 1) * 20));
+    const strongSignal = maxEnergy > minEnergyThreshold && snr > minSNR;
+    const significantDiff = energyDiff > Math.max(maxEnergy * 0.3, 30);
 
-    // 确定检测到的bit
-    let detectedBit: '0' | '1' | undefined;
+    const detected = strongSignal && significantDiff;
+    let bit: string | undefined;
+    let quality = 0;
+
     if (detected) {
-      const energyDiff = Math.abs(energy0 - energy1);
-      const totalEnergy = energy0 + energy1;
-      const minEnergyForBit = totalEnergy * 0.3; // 需要至少30%的能量差异
+      bit = energy1 > energy0 ? '1' : '0';
+      quality = Math.min(100, Math.round((energyDiff / maxEnergy) * 100));
 
-      // 只有当两个频率的能量差异足够大，且其中一个明显更强时才确定bit
-      if (energyDiff > minEnergyForBit && energyDiff > 40) { // 绝对差异至少40
-        detectedBit = energy1 > energy0 ? '1' : '0';
-        console.log(`Strong signal detected: bit=${detectedBit}, energy0=${Math.round(energy0)}, energy1=${Math.round(energy1)}, diff=${Math.round(energyDiff)}, quality=${Math.round(signalQuality)}`);
-      } else {
-        // 信号不够清晰，不确定bit值
-        console.log(`Weak signal: energy0=${Math.round(energy0)}, energy1=${Math.round(energy1)}, diff=${Math.round(energyDiff)} (need >${Math.round(minEnergyForBit)})`);
-      }
+      console.log(`Signal detected: bit=${bit}, energy0=${energy0}, energy1=${energy1}, diff=${energyDiff}, SNR=${snr.toFixed(2)}, quality=${quality}`);
     }
 
     return {
-      freq0: Math.round(energy0),
-      freq1: Math.round(energy1),
+      freq0: energy0,
+      freq1: energy1,
       detected,
-      detectedBit,
-      signalQuality: Math.round(signalQuality)
+      bit,
+      quality,
+      snr
     };
   }
 
   /**
-   * 解码接收到的二进制数据
+   * 计算指定频率范围内的平均能量
+   */
+  private getAverageEnergy(dataArray: Uint8Array, centerBin: number, bandwidth: number): number {
+    let sum = 0;
+    let count = 0;
+
+    for (let i = Math.max(0, centerBin - bandwidth); i <= Math.min(dataArray.length - 1, centerBin + bandwidth); i++) {
+      sum += dataArray[i];
+      count++;
+    }
+
+    return count > 0 ? sum / count : 0;
+  }
+
+  /**
+   * 计算背景噪声水平
+   */
+  private calculateNoiseLevel(dataArray: Uint8Array, bin0: number, bin1: number): number {
+    let noiseSum = 0;
+    let noiseCount = 0;
+
+    // 采样远离目标频率的区域作为噪声参考
+    const avoidRange = 10;
+
+    for (let i = 0; i < dataArray.length; i++) {
+      const farFromBin0 = Math.abs(i - bin0) > avoidRange;
+      const farFromBin1 = Math.abs(i - bin1) > avoidRange;
+
+      if (farFromBin0 && farFromBin1) {
+        noiseSum += dataArray[i];
+        noiseCount++;
+      }
+    }
+
+    return noiseCount > 0 ? noiseSum / noiseCount : 0;
+  }
+
+  /**
+   * 解码接收到的二进制数据，支持前导码检测
+   */
+  decodeBinaryWithPreamble(binaryString: string): {
+    decoded: string;
+    isComplete: boolean;
+    hasValidPreamble: boolean;
+  } {
+    // 查找前导码
+    const preambleIndex = binaryString.indexOf(AudioUtils.PREAMBLE);
+
+    if (preambleIndex === -1) {
+      return { decoded: '', isComplete: false, hasValidPreamble: false };
+    }
+
+    // 提取前导码后的数据
+    const dataStart = preambleIndex + AudioUtils.PREAMBLE.length;
+    const dataSection = binaryString.substring(dataStart);
+
+    // 查找结束标记
+    const endMarkerIndex = dataSection.indexOf('11111111');
+
+    if (endMarkerIndex === -1) {
+      // 还没有接收到完整的消息
+      return { decoded: '', isComplete: false, hasValidPreamble: true };
+    }
+
+    // 提取实际的数据部分
+    const actualData = dataSection.substring(0, endMarkerIndex);
+
+    // 确保数据长度是8的倍数（完整的字符）
+    const completeBytes = Math.floor(actualData.length / 8) * 8;
+    const validData = actualData.substring(0, completeBytes);
+
+    try {
+      const decoded = this.binaryToText(validData);
+      return {
+        decoded,
+        isComplete: true,
+        hasValidPreamble: true
+      };
+    } catch (error) {
+      return { decoded: '', isComplete: false, hasValidPreamble: true };
+    }
+  }
+
+  /**
+   * 解码接收到的二进制数据（兼容旧版本）
    */
   decodeBinary(binaryString: string): string {
-    try {
-      return this.binaryToText(binaryString);
-    } catch (error) {
-      throw new Error('Invalid binary data received');
+    const result = this.decodeBinaryWithPreamble(binaryString);
+    if (result.isComplete) {
+      return result.decoded;
     }
+    throw new Error('Invalid or incomplete binary data received');
   }
 
   /**

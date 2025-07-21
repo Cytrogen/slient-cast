@@ -14,14 +14,21 @@ export const Receiver: React.FC<ReceiverProps> = ({ onMessageReceived, onStatusC
   const [isListening, setIsListening] = useState(false);
   const [status, setStatus] = useState('Not listening');
   const [receivedMessage, setReceivedMessage] = useState('');
-  const [signalStrength, setSignalStrength] = useState({ freq0: 0, freq1: 0 });
+  const [signalStrength, setSignalStrength] = useState({
+    freq0: 0,
+    freq1: 0,
+    quality: 0,
+    snr: 0
+  });
   const [detectedBits, setDetectedBits] = useState('');
-  const [signalQuality, setSignalQuality] = useState(0);
+  const [syncStatus, setSyncStatus] = useState('Waiting for signal...');
 
   const audioUtilsRef = useRef<AudioUtils | null>(null);
   const animationFrameRef = useRef<number | null>(null);
   const binaryBufferRef = useRef<string>('');
   const lastDetectionRef = useRef<number>(0);
+  const consecutiveDetectionRef = useRef<number>(0);
+  const hasPreambleRef = useRef<boolean>(false);
 
   useEffect(() => {
     audioUtilsRef.current = new AudioUtils();
@@ -49,77 +56,65 @@ export const Receiver: React.FC<ReceiverProps> = ({ onMessageReceived, onStatusC
     }
 
     const analysis = audioUtilsRef.current.analyzeSpectrum();
-    setSignalStrength({ freq0: analysis.freq0, freq1: analysis.freq1 });
-    setSignalQuality(analysis.signalQuality);
+    setSignalStrength({
+      freq0: analysis.freq0,
+      freq1: analysis.freq1,
+      quality: analysis.quality,
+      snr: analysis.snr
+    });
 
-    if (analysis.detected && analysis.detectedBit && analysis.signalQuality > 15) {
+    if (analysis.detected && analysis.bit) {
       const currentTime = Date.now();
 
-      // 防止重复检测同一个bit
-      if (currentTime - lastDetectionRef.current > 180) { // 配合200ms bit持续时间
-        // 直接添加到二进制缓冲区
-        binaryBufferRef.current += analysis.detectedBit;
+      // 需要连续检测到信号才认为有效（降低噪声干扰）
+      if (currentTime - lastDetectionRef.current < 150) { // 150ms内的连续检测
+        consecutiveDetectionRef.current++;
+      } else {
+        consecutiveDetectionRef.current = 1;
+      }
+
+      // 只有连续检测到信号或者信号质量很高才接受
+      if (consecutiveDetectionRef.current >= 2 || analysis.quality > 80) {
+        binaryBufferRef.current += analysis.bit;
         setDetectedBits(binaryBufferRef.current);
-
-        console.log(`Detected bit: ${analysis.detectedBit}, Total bits: ${binaryBufferRef.current}`);
-
-        // 如果检测到前导码模式，重新开始
-        if (binaryBufferRef.current.includes('10101010')) {
-          const preambleIndex = binaryBufferRef.current.lastIndexOf('10101010');
-          binaryBufferRef.current = binaryBufferRef.current.substring(preambleIndex + 8);
-          setDetectedBits(binaryBufferRef.current);
-          console.log(`Preamble detected, remaining bits: ${binaryBufferRef.current}`);
-        }
-
-        // 如果有足够的bits（8的倍数），尝试解码
-        if (binaryBufferRef.current.length >= 8) {
-          // 尝试不同的起始位置来找到正确的字符边界
-          let decoded = '';
-          let bestMatch = '';
-          let bestStart = 0;
-
-          for (let start = 0; start < 8 && start < binaryBufferRef.current.length; start++) {
-            const remaining = binaryBufferRef.current.substring(start);
-            const byteLength = Math.floor(remaining.length / 8) * 8;
-
-            if (byteLength >= 8) {
-              const bytes = remaining.substring(0, byteLength);
-
-              try {
-                const testDecoded = audioUtilsRef.current!.decodeBinary(bytes);
-                console.log(`Testing offset ${start}: "${bytes}" -> "${testDecoded}" (${testDecoded.split('').map(c => c.charCodeAt(0)).join(',')})`);
-
-                // 检查是否包含可打印字符
-                if (testDecoded && /^[\x20-\x7E]+$/.test(testDecoded)) {
-                  if (testDecoded.length > bestMatch.length) {
-                    bestMatch = testDecoded;
-                    bestStart = start;
-                  }
-                }
-              } catch (error) {
-                console.log(`Testing offset ${start}: decode error`);
-              }
-            }
-          }
-
-          if (bestMatch) {
-            setReceivedMessage(bestMatch);
-            onMessageReceived?.(bestMatch);
-            setStatus(`Received: "${bestMatch}"`);
-            console.log(`Successfully decoded: "${bestMatch}" at offset ${bestStart}`);
-
-            // 清理已处理的数据
-            const processedBits = bestStart + bestMatch.length * 8;
-            binaryBufferRef.current = binaryBufferRef.current.substring(processedBits);
-          }
-        }
-
-        // 限制缓冲区大小
-        if (binaryBufferRef.current.length > 160) { // 20个字符
-          binaryBufferRef.current = binaryBufferRef.current.substring(40);
-        }
-
         lastDetectionRef.current = currentTime;
+
+        console.log(`Detected bit: ${analysis.bit}, Total bits: ${binaryBufferRef.current.length}`);
+
+        // 检查前导码和解码
+        try {
+          const decodeResult = audioUtilsRef.current.decodeBinaryWithPreamble(binaryBufferRef.current);
+
+          if (decodeResult.hasValidPreamble && !hasPreambleRef.current) {
+            hasPreambleRef.current = true;
+            setSyncStatus('Preamble detected - receiving data...');
+            setStatus('Synchronized - receiving message...');
+          }
+
+          if (decodeResult.isComplete) {
+            setReceivedMessage(decodeResult.decoded);
+            onMessageReceived?.(decodeResult.decoded);
+            setStatus(`Received: "${decodeResult.decoded}"`);
+            setSyncStatus('Message received successfully!');
+
+            // 重置状态准备接收下一条消息
+            setTimeout(() => {
+              binaryBufferRef.current = '';
+              hasPreambleRef.current = false;
+              setSyncStatus('Ready for next message...');
+              if (isListening) {
+                setStatus('Listening for signals...');
+              }
+            }, 3000);
+          }
+        } catch (error) {
+          // 继续监听，可能需要更多数据
+        }
+      }
+    } else {
+      // 没有检测到信号时重置连续检测计数
+      if (Date.now() - lastDetectionRef.current > 200) {
+        consecutiveDetectionRef.current = 0;
       }
     }
 
@@ -140,10 +135,12 @@ export const Receiver: React.FC<ReceiverProps> = ({ onMessageReceived, onStatusC
       setStatus('Listening for signals...');
       setReceivedMessage('');
       setDetectedBits('');
+      setSyncStatus('Waiting for signal...');
       binaryBufferRef.current = '';
+      hasPreambleRef.current = false;
+      consecutiveDetectionRef.current = 0;
 
       console.log('Started listening for ultrasonic signals...');
-
       listenLoop();
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Failed to start listening';
@@ -166,7 +163,10 @@ export const Receiver: React.FC<ReceiverProps> = ({ onMessageReceived, onStatusC
 
     setIsListening(false);
     setStatus('Not listening');
-    setSignalStrength({ freq0: 0, freq1: 0 });
+    setSignalStrength({ freq0: 0, freq1: 0, quality: 0, snr: 0 });
+    setSyncStatus('Stopped');
+    consecutiveDetectionRef.current = 0;
+    hasPreambleRef.current = false;
   };
 
   /**
@@ -175,8 +175,10 @@ export const Receiver: React.FC<ReceiverProps> = ({ onMessageReceived, onStatusC
   const clearReceived = () => {
     setReceivedMessage('');
     setDetectedBits('');
+    setSyncStatus('Waiting for signal...');
     binaryBufferRef.current = '';
-    console.log('Cleared received data');
+    hasPreambleRef.current = false;
+    consecutiveDetectionRef.current = 0;
     if (isListening) {
       setStatus('Listening for signals...');
     }
@@ -239,18 +241,34 @@ export const Receiver: React.FC<ReceiverProps> = ({ onMessageReceived, onStatusC
         {isListening && (
           <div className="bg-gray-50 p-3 rounded-md">
             <div className="text-xs text-gray-600 mb-2">Signal Analysis:</div>
-            <div className="grid grid-cols-3 gap-2 text-xs">
+            <div className="grid grid-cols-2 gap-2 text-xs mb-2">
               <div className="bg-blue-100 p-2 rounded">
                 <div>Freq 0 (17.5kHz)</div>
-                <div className="font-mono">{signalStrength.freq0}</div>
+                <div className="font-mono">{signalStrength.freq0.toFixed(0)}</div>
               </div>
               <div className="bg-green-100 p-2 rounded">
                 <div>Freq 1 (18.5kHz)</div>
-                <div className="font-mono">{signalStrength.freq1}</div>
+                <div className="font-mono">{signalStrength.freq1.toFixed(0)}</div>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <div className="bg-yellow-100 p-2 rounded">
+                <div>Quality</div>
+                <div className="font-mono">{signalStrength.quality}%</div>
               </div>
               <div className="bg-purple-100 p-2 rounded">
-                <div>Signal Quality</div>
-                <div className="font-mono">{signalQuality}%</div>
+                <div>SNR</div>
+                <div className="font-mono">{signalStrength.snr.toFixed(1)}</div>
+              </div>
+            </div>
+            <div className="mt-2 text-xs text-gray-600">
+              <div className={`font-medium ${
+                syncStatus.includes('detected') ? 'text-green-600' :
+                  syncStatus.includes('receiving') ? 'text-blue-600' :
+                    syncStatus.includes('success') ? 'text-green-600' :
+                      'text-gray-600'
+              }`}>
+                {syncStatus}
               </div>
             </div>
           </div>

@@ -44,15 +44,20 @@ export const Transmitter: React.FC<TransmitterProps> = ({ onStatusChange }) => {
       await audioUtilsRef.current.initAudioContext();
       setStatus('Transmitting signal...');
 
+      console.log(`Transmitting message: "${message}"`);
+      console.log(`Binary (with preamble): 10101010${audioUtilsRef.current.textToBinary(message)}`);
+
       // 等待传输完成
       await audioUtilsRef.current.transmitText(message);
 
       setStatus('Transmission complete');
+      console.log('Transmission completed');
       setTimeout(() => setStatus('Ready to transmit'), 2000);
 
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Transmission failed';
       setStatus(`Error: ${errorMessage}`);
+      console.error('Transmission error:', error);
       setTimeout(() => setStatus('Ready to transmit'), 3000);
     } finally {
       setIsTransmitting(false);

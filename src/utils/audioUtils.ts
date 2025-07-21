@@ -59,17 +59,16 @@ export class AudioUtils {
       throw new Error('Audio context not initialized');
     }
 
-    // 添加前导码：10101010（帮助接收端同步）
-    const preamble = '10101010';
-    const binary = preamble + this.textToBinary(text);
-    const duration = binary.length * AudioUtils.BIT_DURATION + 0.2; // 额外200ms缓冲
+    // 临时去掉前导码，直接发送文本
+    const binary = this.textToBinary(text);
+    const duration = binary.length * AudioUtils.BIT_DURATION + 0.3; // 额外300ms缓冲
 
     // 创建音频buffer
     const buffer = this.audioContext.createBuffer(1, duration * AudioUtils.SAMPLE_RATE, AudioUtils.SAMPLE_RATE);
     const data = buffer.getChannelData(0);
 
-    // 100ms静音开始
-    const silentSamples = 0.1 * AudioUtils.SAMPLE_RATE;
+    // 200ms静音开始
+    const silentSamples = 0.2 * AudioUtils.SAMPLE_RATE;
 
     // 生成RTZ-FSK调制信号
     for (let i = 0; i < binary.length; i++) {
@@ -81,7 +80,7 @@ export class AudioUtils {
       for (let sample = startSample; sample < endSample && sample < data.length; sample++) {
         const time = sample / AudioUtils.SAMPLE_RATE;
         // 使用更稳定的信号幅度
-        data[sample] = Math.sin(2 * Math.PI * frequency * time) * 0.2;
+        data[sample] = Math.sin(2 * Math.PI * frequency * time) * 0.3;
       }
     }
 

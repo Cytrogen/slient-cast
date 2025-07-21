@@ -56,50 +56,39 @@ export const Receiver: React.FC<ReceiverProps> = ({ onMessageReceived, onStatusC
       const currentTime = Date.now();
 
       // 防止重复检测同一个bit
-      if (currentTime - lastDetectionRef.current > 90) {
+      if (currentTime - lastDetectionRef.current > 120) { // 增加间隔
         // 直接添加到二进制缓冲区
         binaryBufferRef.current += analysis.detectedBit;
         setDetectedBits(binaryBufferRef.current);
 
         console.log(`Detected bit: ${analysis.detectedBit}, Total bits: ${binaryBufferRef.current}`);
 
-        // 如果收集到足够的bits，尝试解码
-        if (binaryBufferRef.current.length >= 16) { // 至少2个字符
+        // 如果检测到前导码模式，重新开始
+        if (binaryBufferRef.current.includes('10101010')) {
+          const preambleIndex = binaryBufferRef.current.lastIndexOf('10101010');
+          binaryBufferRef.current = binaryBufferRef.current.substring(preambleIndex + 8);
+          setDetectedBits(binaryBufferRef.current);
+          console.log(`Preamble detected, remaining bits: ${binaryBufferRef.current}`);
+        }
+
+        // 如果有足够的bits（8的倍数），尝试解码
+        const byteLength = Math.floor(binaryBufferRef.current.length / 8) * 8;
+        if (byteLength >= 8 && binaryBufferRef.current.length >= 16) {
+          const bytes = binaryBufferRef.current.substring(0, byteLength);
+
           try {
-            // 跳过前导码，寻找有效的字符边界
-            let bestMatch = '';
-            let bestStart = 0;
-
-            // 尝试不同的起始位置
-            for (let start = 0; start <= 8; start++) {
-              const remaining = binaryBufferRef.current.substring(start);
-              const byteLength = Math.floor(remaining.length / 8) * 8;
-
-              if (byteLength >= 8) {
-                const bytes = remaining.substring(0, byteLength);
-                try {
-                  const decoded = audioUtilsRef.current!.decodeBinary(bytes);
-                  // 检查是否包含可打印字符
-                  if (decoded && /^[\x20-\x7E]*$/.test(decoded) && decoded.length > 0) {
-                    if (decoded.length > bestMatch.length) {
-                      bestMatch = decoded;
-                      bestStart = start;
-                    }
-                  }
-                } catch (e) {
-                  // 继续尝试下一个起始位置
-                }
-              }
-            }
-
-            if (bestMatch) {
-              setReceivedMessage(bestMatch);
-              onMessageReceived?.(bestMatch);
-              setStatus(`Received: "${bestMatch}"`);
-              console.log(`Successfully decoded: "${bestMatch}"`);
+            const decoded = audioUtilsRef.current!.decodeBinary(bytes);
+            // 检查是否包含可打印字符
+            if (decoded && /^[\x20-\x7E]+$/.test(decoded)) {
+              setReceivedMessage(decoded);
+              onMessageReceived?.(decoded);
+              setStatus(`Received: "${decoded}"`);
+              console.log(`Successfully decoded: "${decoded}"`);
 
               // 清理已处理的数据
-              binaryBufferRef.current = binaryBufferRef.current.substring(bestStart + bestMatch.length * 8);
+              binaryBufferRef.current = binaryBufferRef.current.substring(byteLength);
+            } else {
+              console.log(`Decoded non-printable: ${decoded} (${decoded.charCodeAt(0)})`);
             }
 
           } catch (error) {
@@ -107,9 +96,9 @@ export const Receiver: React.FC<ReceiverProps> = ({ onMessageReceived, onStatusC
           }
         }
 
-        // 限制缓冲区大小，防止无限增长
-        if (binaryBufferRef.current.length > 200) {
-          binaryBufferRef.current = binaryBufferRef.current.substring(50);
+        // 限制缓冲区大小
+        if (binaryBufferRef.current.length > 160) { // 20个字符
+          binaryBufferRef.current = binaryBufferRef.current.substring(40);
         }
 
         lastDetectionRef.current = currentTime;

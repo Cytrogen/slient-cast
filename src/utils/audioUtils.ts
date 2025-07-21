@@ -193,11 +193,16 @@ export class AudioUtils {
     noiseLevel = noiseCount > 0 ? noiseLevel / noiseCount : 50;
 
     // 动态阈值：基于噪声水平
-    const dynamicThreshold = Math.max(noiseLevel + 30, 80);
+    const dynamicThreshold = Math.max(noiseLevel + 20, 60); // 降低阈值
 
     // 检测信号
     const maxEnergy = Math.max(energy0, energy1);
     const detected = maxEnergy > dynamicThreshold;
+
+    // 每100次循环输出一次调试信息（避免日志过多）
+    if (Math.random() < 0.01) {
+      console.log(`Spectrum: freq0=${Math.round(energy0)}, freq1=${Math.round(energy1)}, noise=${Math.round(noiseLevel)}, threshold=${Math.round(dynamicThreshold)}, detected=${detected}`);
+    }
 
     // 计算信号质量
     const signalToNoise = maxEnergy / (noiseLevel + 1);
@@ -207,11 +212,12 @@ export class AudioUtils {
     let detectedBit: '0' | '1' | undefined;
     if (detected) {
       const energyDiff = Math.abs(energy0 - energy1);
-      const minEnergyForBit = Math.max(energy0, energy1) * 0.3;
+      const minEnergyForBit = Math.max(energy0, energy1) * 0.2; // 降低要求
 
       // 只有当两个频率的能量差异足够大时才确定bit
       if (energyDiff > minEnergyForBit) {
         detectedBit = energy1 > energy0 ? '1' : '0';
+        console.log(`Strong signal detected: bit=${detectedBit}, energy0=${Math.round(energy0)}, energy1=${Math.round(energy1)}, quality=${Math.round(signalQuality)}`);
       }
     }
 

@@ -11,9 +11,9 @@ export class AudioUtils {
 
   // 信号参数配置
   private static readonly CARRIER_FREQUENCY = 18000; // 18kHz载波频率
-  private static readonly BIT_DURATION = 0.1; // 每个bit持续100ms
-  private static readonly FREQ_0 = 17500; // 表示0的频率
-  private static readonly FREQ_1 = 18500; // 表示1的频率
+  private static readonly BIT_DURATION = 0.15; // 每个bit持续150ms（稍微延长）
+  private static readonly FREQ_0 = 3000; // 表示0的频率 - 临时改为3kHz测试
+  private static readonly FREQ_1 = 4000; // 表示1的频率 - 临时改为4kHz测试
   private static readonly SAMPLE_RATE = 44100;
 
   /**
@@ -193,7 +193,7 @@ export class AudioUtils {
     noiseLevel = noiseCount > 0 ? noiseLevel / noiseCount : 50;
 
     // 动态阈值：基于噪声水平
-    const dynamicThreshold = Math.max(noiseLevel + 20, 60); // 降低阈值
+    const dynamicThreshold = Math.max(noiseLevel + 15, 30); // 大幅降低阈值
 
     // 检测信号
     const maxEnergy = Math.max(energy0, energy1);
